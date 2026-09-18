@@ -73,6 +73,7 @@ final class ForgeBingoModels
         String title;
         String description;
         String iconUrl;
+        Integer iconItemId;
         String backgroundColor;
         int points;
         int position;

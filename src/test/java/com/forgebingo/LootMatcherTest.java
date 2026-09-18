@@ -74,6 +74,18 @@ public class LootMatcherTest
         assertEquals(100, matched.get(0).itemId);
     }
 
+    @Test
+    public void ignoresDisplayOnlyIconItemId()
+    {
+        ForgeBingoModels.BoardResponse board = boardWithRule(false, 100);
+        board.tiles.get(0).iconItemId = 24421;
+
+        assertTrue(LootMatcher.matchedItems(board, 42,
+            Collections.singletonList(new ItemStack(24421, 1))).isEmpty());
+        assertEquals(1, LootMatcher.matchedItems(board, 42,
+            Collections.singletonList(new ItemStack(100, 1))).size());
+    }
+
     private static ForgeBingoModels.BoardResponse boardWithRule(boolean completed, Integer... itemIds)
     {
         ForgeBingoModels.LootRule rule = new ForgeBingoModels.LootRule();
