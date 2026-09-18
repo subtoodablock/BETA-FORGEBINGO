@@ -14,6 +14,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.callback.ClientThread;
@@ -33,6 +34,7 @@ import net.runelite.client.util.ImageUtil;
     description = "Read-only ForgeBingo boards with server-validated NPC-loot progress",
     tags = {"bingo", "clan", "team", "loot", "external", "integration"}
 )
+@Slf4j
 public class ForgeBingoPlugin extends Plugin
 {
     private static final long MAX_RETRY_SECONDS = 300L;
@@ -118,15 +120,43 @@ public class ForgeBingoPlugin extends Plugin
     {
         ForgeBingoModels.BoardResponse board = activeBoard;
         String apiKey = apiKey();
-        if (board == null || apiKey.isEmpty() || event.getNpc() == null) return;
+        if (event.getNpc() == null)
+        {
+            log.info("ForgeBingo ignored an NPC-loot event with no NPC");
+            return;
+        }
+
+        log.info("ForgeBingo saw NPC loot: npc={} ({}), items={}",
+            event.getNpc().getName(), event.getNpc().getId(), itemSummary(event.getItems()));
+        if (board == null)
+        {
+            log.info("ForgeBingo cannot match this drop because no active board is loaded");
+            return;
+        }
+        if (apiKey.isEmpty())
+        {
+            log.info("ForgeBingo cannot submit this drop because no API key is configured");
+            return;
+        }
 
         List<ForgeBingoModels.LootItem> matches = LootMatcher.matchedItems(
             board, event.getNpc().getId(), event.getItems());
-        if (matches.isEmpty()) return;
+        if (matches.isEmpty())
+        {
+            log.info("ForgeBingo found no active tile matching npc={} and items={}",
+                event.getNpc().getId(), itemSummary(event.getItems()));
+            return;
+        }
+        log.info("ForgeBingo matched drop items={} on board={}; screenshotEnabled={}",
+            lootItemSummary(matches), board.teamBoardId, config.uploadProofScreenshots());
 
         String signature = EventDeduplicator.lootSignature(board.teamBoardId, event.getNpc().getId(),
             event.getNpc().getIndex(), client.getTickCount(), matches);
-        if (!eventDeduplicator.firstSeen(signature)) return;
+        if (!eventDeduplicator.firstSeen(signature))
+        {
+            log.info("ForgeBingo ignored a duplicate loot event");
+            return;
+        }
 
         CompletableFuture<BufferedImage> captured = ProofUploadPolicy.shouldCapture(config.uploadProofScreenshots(), matches)
             ? captureProofFrameAfterDelay()
@@ -345,16 +375,24 @@ public class ForgeBingoPlugin extends Plugin
                 if (stopped) return;
                 if (response != null && response.automationDisabled)
                 {
+                    log.info("ForgeBingo loot submission succeeded, but server automation is paused");
                     if (panel != null) panel.showAutomationPaused();
                     loadBoard(boardId);
                     return;
                 }
                 List<String> matchedTileIds = ProofUploadPolicy.matchedTileIds(response);
+                log.info("ForgeBingo loot submission succeeded: matchedTiles={}, duplicate={}",
+                    matchedTileIds.size(), response != null && response.duplicate);
                 if (!matchedTileIds.isEmpty() && config.uploadProofScreenshots())
                 {
                     captured.thenAccept(image -> {
-                        if (image != null) uploadProof(new PendingProof(boardId, matchedTileIds, image));
+                        if (image != null)
+                        {
+                            log.info("ForgeBingo captured proof screenshot: {}x{}", image.getWidth(), image.getHeight());
+                            uploadProof(new PendingProof(boardId, matchedTileIds, image));
+                        }
                     }).exceptionally(error -> {
+                        log.warn("ForgeBingo screenshot capture failed", error);
                         if (panel != null) panel.showError("Screenshot capture failed");
                         return null;
                     });
@@ -366,6 +404,8 @@ public class ForgeBingoPlugin extends Plugin
             public void onFailure(String message)
             {
                 long delay = RetryPolicy.lootDelaySeconds(attempt, MAX_RETRY_SECONDS);
+                log.warn("ForgeBingo loot submission failed (attempt {}); retrying in {} seconds: {}",
+                    attempt + 1, delay, message);
                 executor.schedule(() -> sendLootWithRetry(key, boardId, request, captured, attempt + 1), delay, TimeUnit.SECONDS);
                 if (panel != null) panel.showError("Loot sync retrying");
             }
@@ -411,6 +451,7 @@ public class ForgeBingoPlugin extends Plugin
             public void onSuccess(Boolean ignored)
             {
                 failedProof = null;
+                log.info("ForgeBingo proof screenshot uploaded for {} tile(s)", proof.tileIds.size());
                 if (panel != null) panel.clearProofFailure();
                 loadBoard(proof.boardId);
             }
@@ -419,6 +460,7 @@ public class ForgeBingoPlugin extends Plugin
             public void onFailure(String message)
             {
                 failedProof = proof;
+                log.warn("ForgeBingo proof screenshot upload failed: {}", message);
                 if (panel != null) panel.showProofFailure(message);
             }
         });
@@ -428,6 +470,27 @@ public class ForgeBingoPlugin extends Plugin
     {
         String key = config.apiKey();
         return key == null ? "" : key.trim();
+    }
+
+    private static String itemSummary(Iterable<ItemStack> items)
+    {
+        if (items == null) return "[]";
+        List<String> values = new ArrayList<>();
+        for (ItemStack item : items)
+        {
+            if (item != null) values.add(item.getId() + "x" + item.getQuantity());
+        }
+        return values.toString();
+    }
+
+    private static String lootItemSummary(List<ForgeBingoModels.LootItem> items)
+    {
+        List<String> values = new ArrayList<>();
+        for (ForgeBingoModels.LootItem item : items)
+        {
+            if (item != null) values.add(item.itemId + "x" + item.quantity);
+        }
+        return values.toString();
     }
 
     private static final class PendingProof
